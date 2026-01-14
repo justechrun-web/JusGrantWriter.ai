@@ -1,0 +1,8 @@
+{
+  "name": "Grant Factory Orchestrator",
+  "description": "A sophisticated AI-driven proposal building platform that follows a 7-stage orchestrated workflow with mandatory compliance gates and agent-routed drafting.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
