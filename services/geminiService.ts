@@ -1,198 +1,144 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
+import { Opportunity, BidStage, BidPacket } from "../types";
 
+// Initialize the Gemini API client with the API key from environment variables
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const geminiService = {
   /**
-   * Stage 1: Compliance Agent
-   * Handles both raw text and PDF file inputs via multimodal parts.
+   * Scout Agent: Search Feed with Google Search Grounding
    */
-  async evaluateCompliance(nofoText: string, orgProfile: string, pdfBase64?: string) {
-    const parts: any[] = [
-      {
-        text: `You are the Compliance Checker Agent. 
-        Analyze the provided solicitation (NOFO/BAA) and Organization Profile.
-        
-        ORG PROFILE: ${orgProfile}
-        
-        TASKS:
-        1. Verify applicant eligibility.
-        2. Identify disqualifiers and fatal flaws.
-        3. Extract deadlines, page limits, formatting rules.
-        4. List required attachments.
-        5. Extract scoring criteria and weights.
-        
-        If the solicitation is provided as a PDF attachment, prioritize its content.`
-      }
-    ];
-
-    if (nofoText) {
-      parts.push({ text: `SOLICITATION TEXT: ${nofoText}` });
-    }
-
-    if (pdfBase64) {
-      parts.push({
-        inlineData: {
-          mimeType: "application/pdf",
-          data: pdfBase64
-        }
-      });
-    }
+  async scoutOpportunities(query: any): Promise<Opportunity[]> {
+    const prompt = `Search for active federal contract opportunities on SAM.gov and Grants.gov related to ${JSON.stringify(query)}. 
+    Return a diverse list of contracts. 
+    Use CLARITY and SPECIFICITY. Provide title, agency, notice ID, award value, and response deadline.
+    Ensure each opportunity has a valid 'id' and 'noticeId'.
+    Return the results in a valid JSON array format.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
-      contents: { parts },
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: { 
+        tools: [{ googleSearch: {} }]
+      }
+    });
+
+    try {
+      const text = response.text || "";
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      const results: Opportunity[] = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+      
+      const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+      const sources = groundingChunks
+        .filter(chunk => chunk.web)
+        .map(chunk => ({
+          title: chunk.web?.title,
+          uri: chunk.web?.uri
+        }));
+
+      return results.map((opp: any) => ({
+        ...opp,
+        sources: sources.length > 0 ? sources : undefined
+      }));
+    } catch (e) {
+      console.error("Failed to parse scout results:", e);
+      return [];
+    }
+  },
+
+  /**
+   * Analyze Solicitation: systematic breakdown into 5 key areas
+   */
+  async analyzeSolicitation(opp: Opportunity): Promise<any> {
+    const prompt = `Analyze this solicitation with expert precision:
+    TITLE: ${opp.title}
+    AGENCY: ${opp.agency}
+    DESCRIPTION: ${opp.description}
+
+    Break it down into the following 6 sections using active voice and removing robotic AI language:
+    1. SUMMARY: A concise overview of the need.
+    2. ELIGIBILITY: Clear requirements for who can bid.
+    3. DELIVERABLES: List of key outputs/objectives.
+    4. INSTRUCTIONS: Submission formatting and deadlines.
+    5. BUDGET: Estimated value or duration.
+    6. COMPLIANCE: POC info and critical clauses.
+
+    Return the analysis in a valid JSON object.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            decision: { type: Type.STRING, description: 'GO or NO-GO' },
-            rationale: { type: Type.STRING },
-            checks: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  item: { type: Type.STRING },
-                  status: { type: Type.STRING, description: 'pass, fail, or warning' },
-                  blocking: { type: Type.BOOLEAN },
-                  reason: { type: Type.STRING },
-                  fatalFlaw: { type: Type.BOOLEAN }
-                },
-                required: ['item', 'status', 'blocking']
-              }
-            }
+            summary: { type: Type.STRING },
+            eligibility: { type: Type.STRING },
+            deliverables: { type: Type.STRING },
+            instructions: { type: Type.STRING },
+            budget: { type: Type.STRING },
+            compliance: { type: Type.STRING },
           },
-          required: ['decision', 'rationale', 'checks']
+          required: ["summary", "eligibility", "deliverables", "instructions", "budget", "compliance"]
         }
       }
     });
-    return JSON.parse(response.text);
-  },
 
-  /**
-   * Stage 2: Grant Architecture Agent
-   */
-  async generateArchitecture(nofo: string, pdfBase64?: string) {
-    const parts: any[] = [
-      {
-        text: `You are the Grant Architecture Agent. 
-        Build a section outline mapped to scoring points and a Logic Model based on the solicitation.
-        Identify funder priority language to mirror.`
-      }
-    ];
-
-    if (nofo) parts.push({ text: `NOFO TEXT: ${nofo}` });
-    if (pdfBase64) {
-      parts.push({
-        inlineData: {
-          mimeType: "application/pdf",
-          data: pdfBase64
-        }
-      });
+    try {
+      return JSON.parse(response.text || "{}");
+    } catch (e) {
+      console.error("Analysis parsing failed:", e);
+      return null;
     }
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
-      contents: { parts },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            totalPoints: { type: Type.NUMBER },
-            competitiveThreshold: { type: Type.NUMBER },
-            pageLimit: { type: Type.NUMBER },
-            sections: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING },
-                  points: { type: Type.NUMBER },
-                  subsections: { type: Type.NUMBER }
-                }
-              }
-            },
-            logicModel: {
-              type: Type.OBJECT,
-              properties: {
-                inputs: { type: Type.ARRAY, items: { type: Type.STRING } },
-                activities: { type: Type.ARRAY, items: { type: Type.STRING } },
-                outputs: { type: Type.ARRAY, items: { type: Type.STRING } },
-                outcomes: { type: Type.ARRAY, items: { type: Type.STRING } }
-              }
-            }
-          }
-        }
-      }
-    });
-    return JSON.parse(response.text);
   },
 
   /**
-   * Stage 5: Budget & Allowability Agent
+   * Bid Packet Generator: Enhanced with Active Voice and Expert Context
    */
-  async generateBudget(nofo: string, logicModel: any) {
+  async generateTechnicalProposal(opp: Opportunity, companyProfile: any): Promise<string> {
+    const prompt = `Write a high-compliance technical proposal section for the following federal solicitation:
+    TITLE: ${opp.title}
+    AGENCY: ${opp.agency}
+    DESCRIPTION: ${opp.description}
+    CONTEXT: ${JSON.stringify(companyProfile)}
+
+    EXPERT GUIDELINES:
+    1. Use ACTIVE VOICE exclusively.
+    2. Eliminate generic marketing fluff and robotic AI patterns.
+    3. Ensure SPECIFICITY regarding the deliverables andSection L/M requirements.
+    4. Maintain CLARITY in the technical approach.
+    5. Incorporate company strengths as relevant context.
+    `;
+
     const response = await ai.models.generateContent({
       model: 'gemini-3-pro-preview',
-      contents: `You are the Budget & Allowability Agent. 
-      Build a budget by category tied to project activities.
-      Check allowability under 2 CFR 200.
-      Logic Model: ${JSON.stringify(logicModel)}`,
+      contents: prompt,
       config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              category: { type: Type.STRING },
-              description: { type: Type.STRING },
-              amount: { type: Type.NUMBER },
-              justification: { type: Type.STRING },
-              allowable: { type: Type.BOOLEAN }
-            }
-          }
-        }
+        thinkingConfig: { thinkingBudget: 32768 }
       }
     });
-    return JSON.parse(response.text);
+
+    return response.text || "";
   },
 
   /**
-   * Stage 6: Red Team Agent
+   * Interactive Chatbot: Expert Guide Role
    */
-  async runRedTeamReview(proposalData: any) {
+  async askChatbot(question: string): Promise<string> {
+    const prompt = `You are the JusGrantWriter.ai guide, an expert in government contracting and proposal writing. 
+    Use CLARITY, SPECIFICITY, and CONTEXT. 
+    Question: ${question}`;
+
     const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
-      contents: `You are the Red Team Agent. 
-      Re-score the proposal based on the architecture and identify weak areas.
-      Data: ${JSON.stringify(proposalData)}`,
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
       config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            estimatedScore: { type: Type.NUMBER },
-            fixes: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  area: { type: Type.STRING },
-                  severity: { type: Type.STRING },
-                  recommendation: { type: Type.STRING }
-                }
-              }
-            },
-            readinessVerdict: { type: Type.STRING }
-          }
-        }
+        systemInstruction: "You are a professional federal contracting expert. Remove robotic AI fillers. Use active voice. Provide specific, actionable advice based on federal procurement rules (FAR, Section L, Section M)."
       }
     });
-    return JSON.parse(response.text);
+
+    return response.text || "I'm sorry, I couldn't process that request.";
   }
 };

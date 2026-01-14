@@ -1,6 +1,6 @@
 {
-  "name": "Grant Factory Orchestrator",
-  "description": "A sophisticated AI-driven proposal building platform that follows a 7-stage orchestrated workflow with mandatory compliance gates and agent-routed drafting.",
+  "name": "JusGrantWriter.ai",
+  "description": "The ultimate operating system for federal contracting. Automate discovery, pricing intelligence, and bid packet generation.",
   "requestFramePermissions": [
     "camera",
     "microphone"
